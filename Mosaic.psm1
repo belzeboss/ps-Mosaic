@@ -14,22 +14,7 @@ public static int BinarySearch<T>(System.Collections.Generic.IList<T> list, T va
     return lo;
 }'
 
-function LoadILCTileList([string]$file, $tiles = $null)
-{
-	if ($null -eq $tiles){
-		$tiles = [System.Collections.Generic.Dictionary[long, [System.Collections.Generic.List[string]]]]::new()
-	}
-	gc "$file" -ErrorAction SilentlyContinue | % {
-		$info = "$_".Split("_"[0], 2) # get ILC_XXX;; copy the whole command in, to be interpreted by CreateNail itself
-		$ilc = [convert]::ToUInt32($info[0])
-		if (-not $tiles.ContainsKey($ilc)){
-			$null = $tiles.Add($ilc, [System.Collections.Generic.List[string]]::new())
-		}
-		$tiles[$ilc].Add("$_")
-	}
-	return $tiles
-}
-
+# Helper function to find the tile-path (ILC-Info) in $ilcMap based on the $ilc
 function GetTileProvider
 {
 	param(
@@ -47,6 +32,7 @@ function GetTileProvider
 	$pathCount = 0
 	$ilcPathsList = [System.Collections.Generic.List[System.Collections.Generic.List[string]]]::new()
 
+	# collect path-lists down to lower-ilc
 	$lowerIlc = $ilc - $ilcTolerance
 	$index = if ($closestIndex -eq 0){0}else{$closestIndex-1}
 	while($sortedIlc[$index] -ge $lowerIlc){
@@ -56,7 +42,7 @@ function GetTileProvider
 		$index--
 		if ($index -lt 0){ break }
 	}
-
+	# collect path-lists up to upper-ilc
 	$upperIlc = $ilc + $ilcTolerance
 	$index = if ($closestIndex -ge ($sortedIlc.Count-1)){$sortedIlc.Count-1}else{$closestIndex+1}
 	while($sortedIlc[$index] -le $upperIlc){
@@ -66,31 +52,32 @@ function GetTileProvider
 		$index++
 		if ($index -ge $sortedIlc.Count){ break }
 	}
-
+	# if no path has been found, add closest path-list
 	if ($pathCount -eq 0){
 		$a = $ilc - $sortedIlc[$closestIndex]
 		$b = $sortedIlc[$closestIndex+1] - $ilc
 		$closestIlc = if ($a -gt $b){
+			# upper bound is closer to ilc
 			$sortedIlc[$closestIndex+1]
 		}
 		else {
+			# lower bound is closer to ilc
 			$sortedIlc[$closestIndex]
 		}
 		$ilcPaths = $ilcMap[$closestIlc]
 		$ilcPathsList.Add($ilcPaths)
 		$pathCount += $ilcPaths.Count
 	}
-
+	# uniformly select a random path from all the path-lists
 	$pathNumber = [random]::Shared.next($pathCount)
 	$ilcIndex = 0
 	while($pathNumber -ge $ilcPathsList[$ilcIndex].Count){
 		$pathNumber -= $ilcPathsList[$ilcIndex].Count
 		$ilcIndex++
 	}
-
 	return $ilcPathsList[$ilcIndex][$pathNumber]
 }
-
+# Create the mosaic
 function CreateMosaic
 {
 	[cmdletbinding()]
@@ -106,22 +93,29 @@ function CreateMosaic
 		[switch]$OutILCInfo
 	)
 	begin{
+		# in a job-setting, do this every time to avoid passing ilcMap to the job
 		if (-not $AsJob.IsPresent){
 			# based on max ILC (white)
 			$ilcTolerance = (BitInterleave 255,255,255 8) * $Tolerance / 200
-
-			$ilcMap = $null
-			$ILCFiles | %{
-				$ilcMap = LoadILCTileList -file $_ -tiles $ilcMap
+			# load ilc-map from ILCFiles (ILC 1:n image-path)
+			$ilcMap = [System.Collections.Generic.Dictionary[long, [System.Collections.Generic.List[string]]]]::new()
+			$ILCFiles | gc | %{
+				$info = "$_".Split("_"[0], 2)
+				# get ILC_XXX;; copy the whole command in, to be interpreted by CreateNail itself
+				$ilc = [convert]::ToUInt32($info[0])
+				if (-not $ilcMap.ContainsKey($ilc)){
+					$null = $ilcMap.Add($ilc, [System.Collections.Generic.List[string]]::new())
+				}
+				$ilcMap[$ilc].Add("$_")
 			}
-			# list of long
+			# list of sorted ILCs
 			$sortedIlc = [System.Collections.Generic.List[long]]::new($ilcMap.Keys)
 			$sortedIlc.Sort()
 			Write-Information "Loaded $($sortedIlc.Count) ILCs"
 		}
 	}
 	process{
-		
+		# start the job with different source-image
 		if ($AsJob.IsPresent){
 			$module = (get-command CreateMosaic).Module.Path
 			return Start-Job -ScriptBlock {
@@ -130,8 +124,11 @@ function CreateMosaic
 			} -ArgumentList $module,$Path,$ILCFiles,$Count,$Size,$Tolerance,$AlphaBlend,$DynamicTolerance
 		}
 
+		# The must exist, relative or not; But for "FromFile" we need the absolute path
 		$Path = Resolve-Path $Path
+		# load image
 		$image = [System.Drawing.Image]::FromFile($Path)
+		# 
 		$sampleSize = [math]::Floor($image.Width / $Count)
 		$TileYCount = [math]::Floor($image.Height / $sampleSize)
 
@@ -380,137 +377,6 @@ function CreateNail
 	}
 	return $tile
 }
-function StreamPixel
-{
-	param(
-		[System.Drawing.Bitmap]$Image,
-		[string]$ImagePath,
-		[int]$X = 0,
-		[int]$Y = 0,
-		[int]$Width = 0,
-		[int]$Height = 0,
-		[int]$StepX = 1,
-		[int]$StepY = 1
-		)
-	if ($null -eq $Image){
-		$ImagePath = Resolve-Path "$ImagePath"
-		$Image = [System.Drawing.Image]::FromFile($ImagePath)
-	}
-	if ($Width -le 0){ $Width = $Image.Width }
-	if ($Height -le 0){ $Height = $Image.Height }
-	$bytesPerPixel = [System.Drawing.Bitmap]::GetPixelFormatSize($Image.PixelFormat) -shr 3
-	$rect = [System.Drawing.Rectangle]::new($X, $Y, $Width, $Height)
-	$buf = [byte[]]::new($bytesPerPixel * $rect.Width)
-	$data = $Image.LockBits($rect, "ReadOnly", $Image.PixelFormat)
-	$p = $data.Scan0
-	for ($r = 0; $r -lt $rect.Height; $r+=$StepY){
-		[System.Runtime.InteropServices.Marshal]::Copy($p, $buf, 0, $buf.Length)
-		$p = [System.IntPtr]::Add($p, $data.Stride*$StepY)
-		for ($c = $bytesPerPixel; $c -le $rect.Width; $c+=$bytesPerPixel*$StepX){
-			$a = $c - $bytesPerPixel
-			switch ($bytesPerPixel) {
-				4 { [System.Drawing.Color]::FromArgb($buf[$a],$buf[$a+1],$buf[$a+2],$buf[$a+3]) }
-				3 { [System.Drawing.Color]::FromArgb(0, $buf[$a],$buf[$a+1],$buf[$a+2]) }
-				2 { [System.Drawing.Color]::FromArgb(0, $buf[$a],$buf[$a+1],255-$buf[$a]) }
-				1 { [System.Drawing.Color]::FromArgb(0, $buf[$a],$buf[$a],$buf[$a]) }
-				Default {
-					$buf[$a..($c-1)]
-				}
-			}
-			#BitInterleave -Numbers $buf[($c-$bytesPerPixel)..($c-1)] -BitCount 8
-		}
-	}
-	$Image.UnlockBits($data)
-}
-filter Sample(
-	[int]$SkipEvery,
-	[int]$Position = 0,
-	[Parameter(ValueFromPipeline=$true)]$Value)
-{
-	if ($Position++ -ge $SkipEvery){
-		$Value
-		$Position = 0
-	}
-}
-function grid(
-	[System.Numerics.Complex]$center = [System.Numerics.Complex]::Zero,
-	[double]$range = 2.0,
-	[int]$n = 10)
-{
-	$min = [System.Numerics.Complex]::new($center.Real - $range, $center.Imaginary - $range)
-	$z = $min
-	$d = ($range*2)/($n-1)
-	for ($x=0; $x -lt $n; $x++){
-		for ($y=0; $y -lt $n; $y++){
-			Write-Output $z
-			$z = [System.Numerics.Complex]::new($z.Real, $z.Imaginary + $d)
-		}
-		$z = [System.Numerics.Complex]::new($z.Real + $d, $min.Imaginary)
-	}
-}
-filter mandel
-{
-	param(
-		[System.Numerics.Complex]$c,
-		$iterations = 100,
-		[Parameter(ValueFromPipeline=$true)][System.Numerics.Complex]$z
-	)
-	$n = $iterations
-	while($n -gt 0 -and [System.Numerics.Complex]::Abs($z) -lt 2){
-		$z = [System.Numerics.Complex]::Multiply($z, $z)
-		$z = [System.Numerics.Complex]::Multiply($z, 2.0)
-		$z = [System.Numerics.Complex]::Add($z, $c)
-		$n--
-	}
-	$p = $n/$iterations
-	return $p
-}
-
-
-function ToBitmap
-{
-    [CmdletBinding()]
-    param(
-        [string]$Filename,
-        [int]$Width = 100,
-		[switch]$GrayScale,
-		[System.Drawing.Imaging.PixelFormat]$Format = [System.Drawing.Imaging.PixelFormat]::Format24bppRgb,
-        [Parameter(ValueFromPipeline=$true)][byte]$Byte
-    )
-    begin {
-		$buf = [byte[]]::new($Width * 3)
-		$i = 0
-		$r = [System.Drawing.Rectangle]::new(0, 0, $Width, 1)
-	}
-	process {
-		$buf[$i++] = $Byte
-		if ($GrayScale.IsPresent){
-			$buf[$i++] = $Byte
-			$buf[$i++] = $Byte
-		}
-		if ($i -eq $buf.Length){
-			$i = 0
-			$image = [System.Drawing.Bitmap]::new($Width, 1, $Format)
-			$data = $image.LockBits($r, "WriteOnly", $Format)
-			[System.Runtime.InteropServices.Marshal]::Copy($buf, 0, $data.Scan0, $buf.Length)
-			$image.UnlockBits($data)
-			$finalImage = CombineImage $finalImage $image -Down
-			Write-Progress "Row $($finalImage.Height)"
-		}
-	}
-	end {
-		if ($i -gt 0){
-			$image = [System.Drawing.Bitmap]::new($Width, 1, $Format)
-			$data = $image.LockBits($r, "WriteOnly", $Format)
-			[System.Runtime.InteropServices.Marshal]::Copy($buf, 0, $data.Scan0, $buf.Length)
-			$image.UnlockBits($data)
-			$finalImage = CombineImage $finalImage $image -Down
-		}
-		$finalImage.Save($Filename)
-		$finalImage.Dispose()
-	}
-}
-
 function GetAvgILC
 {
 	param(
