@@ -241,20 +241,32 @@ filter GetAllILCInfo
 
 	try{
 		$Image = [System.Drawing.Image]::FromFile($ImagePath)
-		# center
-		CreateNail -ImagePath $ImagePath -Image $Image -w $Width -h $Height -OutILCInfo -XPortion 0.5 -YPortion 0.5 -Scale 1
-		# left or top
-		CreateNail -ImagePath $ImagePath -Image $Image -w $Width -h $Height -OutILCInfo -XPortion 0 -YPortion 0 -Scale 1
-		# right or bottom
-		CreateNail -ImagePath $ImagePath -Image $Image -w $Width -h $Height -OutILCInfo -XPortion 1 -YPortion 1 -Scale 1
-		# left-top-corner (70%)
-		CreateNail -ImagePath $ImagePath -Image $Image -w $Width -h $Height -OutILCInfo -XPortion 0 -YPortion 0 -Scale 0.7
-		# right-top-corner (70%)
-		CreateNail -ImagePath $ImagePath -Image $Image -w $Width -h $Height -OutILCInfo -XPortion 1 -YPortion 0 -Scale 0.7
-		# left-bottom-corner (70%)
-		CreateNail -ImagePath $ImagePath -Image $Image -w $Width -h $Height -OutILCInfo -XPortion 0 -YPortion 1 -Scale 0.7
-		# right-bottom-corner (70%)
-		CreateNail -ImagePath $ImagePath -Image $Image -w $Width -h $Height -OutILCInfo -XPortion 1 -YPortion 1 -Scale 0.7
+		function center($p){
+			CreateNail -ImagePath $ImagePath -Image $Image -w $Width -h $Height -OutILCInfo -XPortion 0.5 -YPortion 0.5 -Scale ($p/100)
+		}
+		function tiling($p) {
+			if ($Image.Width * ($p/100) -lt $Width){
+				return
+			}
+			if ($Image.Height * ($p/100) -lt $Height){
+				return
+			}
+			for($xp = 0; $xp -le 100; $xp += $p)
+			{
+				for($yp = 0; $yp -le 100; $yp += $p)
+				{
+					CreateNail -ImagePath $ImagePath -Image $Image -w $Width -h $Height -OutILCInfo -XPortion ($xp/100) -YPortion ($yp/100) -Scale ($p/100)
+				}
+			}
+		}
+		tiling 50
+		tiling 75
+		tiling 100
+
+		center 50
+		center 75
+		center 100
+		$Image.Dispose()
 	}
 	catch{
 		Write-Error "Could not get ILC from $ImagePath"
