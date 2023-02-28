@@ -14,7 +14,95 @@ public static int BinarySearch<T>(System.Collections.Generic.IList<T> list, T va
     return lo;
 }'
 
-# Helper function to find the tile-path (ILC-Info) in $ilcMap based on the $ilc
+function UpdateILC([string]$ilcFile)
+{
+	$fileIlc = [System.Collections.Generic.Dictionary[string, [System.Collections.Generic.List[string]]]]::new()
+
+	$directory = [System.Collections.Generic.HashSet[string]]::new();
+
+	Write-Progress "Check if files got deleted"
+	$deletedFileCount = 0
+	gc "$ilcFile" -ErrorAction SilentlyContinue | % {
+		$info = "$_".Split("_"[0], 7) # First is ILC; Last is FilePat
+
+		if ([System.IO.File]::Exists($info[-1]))
+		{
+			$list = $null
+			if (-not $fileIlc.TryGetValue($info[-1], [ref]$list) ) {
+				$list = [System.Collections.Generic.List[string]]::new()
+				$fileIlc.Add($info[-1], $list)
+
+				$fi = [System.IO.FileInfo]::new($info[-1])
+				$null = $directory.Add($fi.DirectoryName)
+			}
+			$list.Add($_)
+			# check if ILCs are complete?
+		}
+		else
+		{
+			$deletedFileCount++
+		}
+	}
+	if ($deletedFileCount -gt 0){
+		Write-Information "$deletedFileCount entries removed due to missing files"
+	}
+
+	Write-Progress "Find missing ILCs"
+	$addedIlcs = 0
+	foreach($dir in $directory){
+		gci -Recurse -Path $dir | %{
+			if (-not $fileIlc.ContainsKey($_.FullName))
+			{
+				$newIlcs = [System.Collections.Generic.List[string]]::new()
+				$newIlcs = GetAllILCInfo -ImagePath $_.FullName -ErrorAction Ignore
+				if ($newIlcs.Count -gt 0){
+					$fileIlc.Add($_.FullName, $newIlcs)
+				}
+				$addedIlcs += $newIlcs.Count
+			}
+			else
+			{
+				# check if ILCs are complete?
+			}
+		}
+	}
+	if ($addedIlcs -gt 0){
+		Write-Information "Added $addedIlcs entries from new images"
+	}
+	elseif ($deletedFileCount -eq 0){
+		Write-Information ("ILC is up to date!"| Colorize -Code 92)
+		return;
+	}
+	Write-Progress "Write new ILC file"
+	$tmpFile = [System.IO.File]::CreateText("$ilcFile.tmp")
+	foreach($ilcInfos in $fileIlc.Values)
+	{
+		$ilcInfos | %{ $tmpFile.WriteLine($_) }
+	}
+	$tmpFile.Flush()
+	$tmpFile.Close()
+	Write-Information "Written new ILC file: $ilcFile.tmp"
+	mv "$ilcFile.tmp" "$ilcFile" -Force -Confirm
+}
+function LoadILCTileList([string]$file, $tiles = $null)
+{
+	if ($null -eq $tiles){
+		$tiles = [System.Collections.Generic.Dictionary[long, [System.Collections.Generic.List[string]]]]::new()
+	}
+	gc "$file" -ErrorAction SilentlyContinue | % {
+		$info = "$_".Split("_"[0], 7) # First is ILC; Last is FilePat
+		$ilc = [convert]::ToUInt32($info[0])
+		if ([System.IO.File]::Exists($info[-1]))
+		{
+			if (-not $tiles.ContainsKey($ilc)){
+				$null = $tiles.Add($ilc, [System.Collections.Generic.List[string]]::new())
+			}
+			$tiles[$ilc].Add("$_")
+		}
+	}
+	return $tiles
+}
+
 function GetTileProvider
 {
 	param(
@@ -93,22 +181,15 @@ function CreateMosaic
 		[switch]$OutILCInfo
 	)
 	begin{
-		# in a job-setting, do this every time to avoid passing ilcMap to the job
 		if (-not $AsJob.IsPresent){
 			# based on max ILC (white)
 			$ilcTolerance = (BitInterleave 255,255,255 8) * $Tolerance / 200
-			# load ilc-map from ILCFiles (ILC 1:n image-path)
-			$ilcMap = [System.Collections.Generic.Dictionary[long, [System.Collections.Generic.List[string]]]]::new()
-			$ILCFiles | gc | %{
-				$info = "$_".Split("_"[0], 2)
-				# get ILC_XXX;; copy the whole command in, to be interpreted by CreateNail itself
-				$ilc = [convert]::ToUInt32($info[0])
-				if (-not $ilcMap.ContainsKey($ilc)){
-					$null = $ilcMap.Add($ilc, [System.Collections.Generic.List[string]]::new())
-				}
-				$ilcMap[$ilc].Add("$_")
+
+			$ilcMap = $null
+			$ILCFiles | %{
+				$ilcMap = LoadILCTileList -file $_ -tiles $ilcMap
 			}
-			# list of sorted ILCs
+			# list of long
 			$sortedIlc = [System.Collections.Generic.List[long]]::new($ilcMap.Keys)
 			$sortedIlc.Sort()
 			Write-Information "Loaded $($sortedIlc.Count) ILCs"
